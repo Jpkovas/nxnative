@@ -7032,6 +7032,7 @@ static void dispatch(const p_dispatch *dp) {
 }
 // GPU: texture -> buffer (row stride taken from SetCopyRowStride, layer stride from SetCopyImageStride, 0 = tightly packed)
 static void copy_t2b(const p_copy_b2t *c) {
+    rp_flush();   // Materialize pending clears before reading, matching copy_t2t.
     g_wr_epoch++; g_mdx_epoch++;
     if (c->tex) xv_check(c->tex->serial, c->has_view && c->view.set_levels ? c->view.base_level : 0, c->has_view && c->view.set_layers ? c->view.min_layer : 0, "texture-to-buffer copy");
     id<MTLTexture> t = tex_mtl(c->tex);
