@@ -23,6 +23,7 @@
 #include "nvn_dirty.h"
 #include "nvn_refl.h"
 #include "nvn_cover.h"
+#include "nvn_primitive.h"
 #include "dmsh_chain.h"   // DMSH_CHAIN: the translation chain version of the B shader library expected by this source tree, one for every game (beside this file, tools/dmsh_chain.py --header)
 #include "game_profile.h"   // game profile constants (profile id, the profile's switches)
 // Texture slot table per stage: 0-127 the combined handles (nvnCommandBufferBindTexture), 128-255 the separate texture binds (NVN_SEPTEX_SLOT0, nvn_obj.h)
@@ -6911,15 +6912,14 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
             if (!mtl_addr(di->ibuf, (uint64_t)di->count * isz, &mb, &mo) || !(src = [(__bridge id<MTLBuffer>)mb contents])) { RED_ONCE(22, "index buffer is in no memory pool"); return; }
             if (pend_hits(di->ibuf, (uint64_t)di->count * isz)) RED_ONCE(73, "triangle fan / quad index buffer has GPU-side writes in this submission: expanded from the current content");
             src += mo;
-            #define IX(i) (isz == 1 ? (uint32_t)src[i] : isz == 2 ? (uint32_t)((const uint16_t *)src)[i] : ((const uint32_t *)src)[i])
             id<MTLBuffer> ab; size_t off = arena_alloc(((size_t)nt * 12 + 15) & ~(size_t)15, &ab);
             uint32_t *d = (uint32_t *)((uint8_t *)ab.contents + off);
-            for (uint32_t t = 0; t < nt; t++) {
-                if (prim == 6) { d[3 * t] = IX(0); d[3 * t + 1] = IX(t + 1); d[3 * t + 2] = IX(t + 2); }
-                else { uint32_t q = (t >> 1) * 4, h = t & 1; d[3 * t] = IX(q); d[3 * t + 1] = IX(q + 1 + h); d[3 * t + 2] = IX(q + 2 + h); }
-            }
-            #undef IX
-            enc_r_draw_indexed(en, mp, nt * 3, MTLIndexTypeUInt32, g_cur_arena->gpu + off, (NSUInteger)nt * 12, di->instances ? di->instances : 1, di->base_vertex, di->base_instance);
+            // Restart terminates a polygon before the base vertex is added. Joining the
+            // polygons instead cleared valid regions of cached depth/shadow maps.
+            uint32_t count = nvn_expand_primitive(d, src, (uint32_t)di->count, (unsigned)isz,
+                                                  (unsigned)prim, S.restart.on, S.restart.index);
+            if (count) enc_r_draw_indexed(en, mp, count, MTLIndexTypeUInt32, g_cur_arena->gpu + off, (NSUInteger)count * 4,
+                                         di->instances ? di->instances : 1, di->base_vertex, di->base_instance);
             if (g_rt_range_pending) { PD("j rt_level_range pass=%llu vc=%u", g_stat_pass, (unsigned)di->count); g_rt_range_pending = 0; }
             return;
         }
