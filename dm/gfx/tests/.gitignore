@@ -64,3 +64,6 @@ t_linear_readback
 t_linear_readback.dSYM/
 t_pso_pending
 t_pso_pending.dSYM/
+
+t_stencil_view
+t_stencil_view.dSYM/
