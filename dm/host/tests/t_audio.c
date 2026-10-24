@@ -2,6 +2,7 @@
 // Expected values are computed directly from the sample rate and block length: 4800 frames / 48 kHz = 100 ms.
 #include "../hle_audio.c"
 #include <time.h>
+#include <sys/mman.h>
 uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec; }
 static struct { const void *k; void *v; } om[8];
 void *objmap_get(const void *k) { for (int i = 0; i < 8; i++) if (om[i].k == k) return om[i].v; return NULL; }
@@ -45,8 +46,40 @@ static int test_surround_output(void) {
     puts("surround callback: all six channels audible, saturation and split-buffer release verified");
     return 0;
 }
+// Middleware inspects the first word before Stop/Close, then unmaps its PCM
+// storage. Retain inaccessible old pages across reopens so a stale consumer
+// cannot accidentally read a newly allocated block at the same address.
+static int test_output_lifetime(void) {
+    enum { CYCLES = 12 };
+    uint32_t output[16]={0}; uint8_t parameter[16];
+    size_t page=(size_t)getpagesize(), bytes=page*4;
+    void *pcm[CYCLES];gbuf *buffer[CYCLES];
+    h_au_InitParam(parameter);
+    for(int i=0;i<CYCLES;i++) {
+        pcm[i]=mmap(NULL,bytes,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
+        buffer[i]=mmap(NULL,page,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
+        if(pcm[i]==MAP_FAILED||buffer[i]==MAP_FAILED) return 1;
+        if(h_au_OpenDef0(output,parameter)) return 1;
+        if(!output[0]) {
+            puts("FAIL AudioOut open: guest initialization word is zero; middleware skips Close");
+            h_au_Close(output);munmap(pcm[i],bytes);munmap(buffer[i],page);return 1;
+        }
+        h_au_SetBuf(buffer[i],pcm[i],bytes,bytes);
+        if(!h_au_Append(output,buffer[i])) return 1;
+        h_au_Start(output);usleep(1000);dm_audio_suspend(1);
+        // The guest's actual initialization guard, rather than an unconditional close.
+        if(output[0]) { if(h_au_State(output)==STATE_STARTED) h_au_Stop(output);h_au_Close(output); }
+        if(output[0]||objmap_get(output)) { puts("FAIL AudioOut close: guest or host output remains initialized");return 1; }
+        for(int k=0;k<AOMAX;k++) if(g_aos[k]) { puts("FAIL AudioOut close: consumer remains registered");return 1; }
+        if(mprotect(pcm[i],bytes,PROT_NONE)||mprotect(buffer[i],page,PROT_NONE)) return 1;
+        dm_audio_suspend(0);usleep(10000);
+    }
+    for(int i=0;i<CYCLES;i++) {munmap(pcm[i],bytes);munmap(buffer[i],page);}
+    puts("AudioOut lifetime: 12 guarded close/unmap/resume/reopen cycles; no stale consumers");
+    return 0;
+}
 int main(void) {
-    if (test_surround_output()) return 1;
+    if (test_surround_output() || test_output_lifetime()) return 1;
     char out[64], ev[64]; uint8_t prm[16]; gbuf b[3]; static int16_t pcm[3][4800 * 2];
     h_au_InitParam(prm);
     if (h_au_Open(out, ev, NULL, prm)) return 1;
@@ -70,6 +103,7 @@ int main(void) {
     // Scenario 2: the real audio output sink (PCM all 0, inaudible) plays 6 blocks of 100 ms each, pausing at 150 ms (app to background / incoming call) and resuming at 350 ms.
     // Expected: during the pause the silent sink takes over and consumes in real time, all 6 blocks are released in order with 6 events; total duration ~ 600 ms (real time, neither stalled by the pause nor sped up).
     setenv("DM_AUDIO", "1", 1);
+    if (test_output_lifetime()) return 1;
     char out2[64]; gbuf b2[6]; static int16_t pcm2[6][4800 * 2]; g_sig = 0;
     if (h_au_Open(out2, ev, NULL, prm)) return 1;
     for (int i = 0; i < 6; i++) { h_au_SetBuf(&b2[i], pcm2[i], sizeof pcm2[i], sizeof pcm2[i]); h_au_Append(out2, &b2[i]); }
