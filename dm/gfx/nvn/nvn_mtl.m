@@ -1480,9 +1480,23 @@ static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> base, MTLTextur
     if ([holder isKindOfClass:[NvPkg class]]) { id<MTLTexture> old = ((NvPkg *)holder)->tex; ((NvPkg *)holder)->tex = upgraded; defer_obj_release(old); g_ser_gen++;
         if (((NvPkg *)holder)->view) { defer_obj_unref(((NvPkg *)holder)->view); ((NvPkg *)holder)->view = nil; ((NvPkg *)holder)->vbase = 0; } }   // a sparse texture's view of the old one: bound whole until its next upload
     else {
-        tex_put(t->serial, upgraded);
-        alias_key ak; memset(&ak, 0, sizeof ak); ak.pool = (uint64_t)(uintptr_t)t->pool; ak.off = t->off; ak.d = t->d;   // Switch the sharing table to the upgraded one too, so later objects on the same storage get it directly
-        pthread_mutex_lock(&g_smu); if (hm_get_id(&g_alias, &ak) == base) { hm_put_id(&g_alias, &ak, upgraded); CFSetAddValue(g_alias_set, (__bridge const void *)upgraded); } pthread_mutex_unlock(&g_smu);
+        // A usage upgrade replaces the shared image, not just the requesting descriptor. Other live/finalized serials must see subsequent GPU writes too.
+        pthread_mutex_lock(&g_smu);
+        nvn_hmap *tables[] = {&g_by_serial, &g_ghost}; int named = 0, shared = 0;
+        for (unsigned j = 0; j < 2; j++) for (uint32_t i = 0; i < tables[j]->cap; i++) {
+            if (tables[j]->vals[i] != (__bridge void *)base) continue;
+            uint64_t serial; memcpy(&serial, tables[j]->keys + (size_t)i * tables[j]->klen, sizeof serial);
+            void *old = tables[j]->vals[i]; tables[j]->vals[i] = (void *)CFBridgingRetain(upgraded); CFRelease(old); named |= serial == t->serial;
+        }
+        for (uint32_t i = 0; i < g_alias.cap; i++) {
+            if (g_alias.vals[i] != (__bridge void *)base) continue;
+            void *old = g_alias.vals[i]; g_alias.vals[i] = (void *)CFBridgingRetain(upgraded); CFRelease(old); shared = 1;
+        }
+        if (shared) { CFSetRemoveValue(g_alias_set, (__bridge const void *)base); CFSetAddValue(g_alias_set, (__bridge const void *)upgraded); }
+        g_ser_gen++;
+        pthread_mutex_unlock(&g_smu);
+        if (!named) tex_put(t->serial, upgraded);
+        defer_obj_release(base);   // All names now resolve to the replacement; retire the old residency only after its GPU users complete.
     }
     MLOG("texture upgraded to allow %s ser=%llu base format %lu → view format %lu (upgrades=%llu)", add & MTLTextureUsageRenderTarget ? "render-target use" : "format views", t->serial, (unsigned long)base.pixelFormat, (unsigned long)view_pf, ++g_pfv_upgrades);
     return upgraded;
