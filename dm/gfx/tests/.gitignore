@@ -64,3 +64,6 @@ t_linear_readback
 t_linear_readback.dSYM/
 t_pso_pending
 t_pso_pending.dSYM/
+
+t_clear_ds
+t_clear_ds.dSYM/

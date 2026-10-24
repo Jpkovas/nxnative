@@ -7630,17 +7630,14 @@ void mtl_exec(const uint8_t *p) {
                 const p_clear_ds *c = a;
                 if (g_rc_skip) { PD("c %llu depth-stencil clear skipped by conditional rendering", g_stat_pass); break; }
                 if (g_rt_merged) rp_end();
-                // Depth / stencil clear in the middle of a pass: end the current pass and attach the clear to the start of the next one (color attachments load as usual, as a continued pass does above when a clear arrives). It used to be skipped, and later draws depth-tested against stale depth.
-                // When the scissor does not cover the depth target, Metal's load-action clear cannot express a partial clear: drawn as a triangle inside the pass (clear_ds_tri)
-                int mid = g_enc != nil;
+                // A load-action clear covers the full attachment and every stencil bit. Preserve both the scissor and write mask, including before the first draw.
+                unsigned sm = (unsigned)c->stencil_mask & 0xff;
+                if (R.rt.depth && (!scissor_full(R.rt.depth, &R.rt.dview, R.rt.has_dview) || (sm && sm != 0xff))) { clear_ds_tri(c); break; }
+                // A full clear ends the current pass and becomes the next pass's load action; color attachments retain their contents.
                 if (g_enc) {
-                    if (R.rt.depth && !scissor_full(R.rt.depth, &R.rt.dview, R.rt.has_dview)) { clear_ds_tri(c); break; }
                     { static int once; if (!once++) MLOG("mid-pass depth-stencil clear: ending this pass; the clear moves to the start of the next pass (first case pass %llu)", g_stat_pass); }
                     rp_end();
                 }
-                if (R.rt.depth && (!scissor_full(R.rt.depth, &R.rt.dview, R.rt.has_dview) || ((c->stencil_mask & 0xff) && (c->stencil_mask & 0xff) != 0xff))) {
-                    static int once; if (!once++) MLOG("depth-stencil clear with a scissor or partial stencil mask, cleared whole (first case pass %llu mid %d depth mask %d stencil mask %#x scissor %d,%d %dx%d target %ux%u)", g_stat_pass, mid, c->depth_mask, c->stencil_mask,
-                                               R.sc.x, R.sc.y, R.sc.w, R.sc.h, R.rt.depth->d.width, R.rt.depth->d.height); }
                 if (c->depth_mask) { R.clear_d = 1; R.cd = c->depth; }
                 if (c->stencil_mask) { R.clear_s = 1; R.cs = (uint32_t)c->stencil; }
                 PD("c %llu depth-stencil clear recorded ser=%llu depth=%g depth_mask=%d stencil=%d stencil_mask=%#x", g_stat_pass, R.rt.depth ? (unsigned long long)R.rt.depth->serial : 0ull, c->depth, c->depth_mask, c->stencil, c->stencil_mask);
